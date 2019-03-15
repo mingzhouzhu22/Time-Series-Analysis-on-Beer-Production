@@ -1,0 +1,345 @@
+---
+title: "PSTAT 174 Final Project"
+author: "Randy Zhu"
+date: "March 15, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Setup
+## Load libraries
+```{r, message = FALSE}
+library(astsa)
+library(forecast)
+library(ggplot2)
+library(tseries)
+library(MASS)
+library(qpcR)
+```
+
+## Load data
+```{r}
+beer = na.omit(read.csv("/Users/dailyuse/Desktop/beer.csv"))
+colnames(beer) = c("quarters", "beer")
+
+head(beer)
+tail(beer)
+```
+
+# Explore original data
+```{r}
+# plot original time series
+ts_beer = ts(data = beer$beer, start = c(1956, 1), end = c(1994, 2), frequency = 4)
+plot(ts_beer, ylab = "Beer Production (mega-liters)", 
+     main = "Quarterly Beer Production (1956-1994)",
+     sub = "Original Data")
+
+# plot decomposed time series
+plot(stl(ts_beer, s.window="periodic"), main = "Decomposition of Original Data")
+
+# plot acf and pacf
+acf(ts_beer, main="ACF of Original Data", lag.max = 50)
+pacf(ts_beer, main="PACF of Original Data", lag.max = 50)
+
+# plot seasonal
+seasonplot(ts_beer, 4, col = rainbow(39), year.labels = TRUE, 
+           main = "Seasonal Plot of Original Data")
+
+# calculate variance
+var(ts_beer)
+```
+
+# Variance transformation
+## Box-Cox transformation
+```{r}
+# plot boxcox
+bcTransform = boxcox(ts_beer ~ as.numeric(1:length(ts_beer)))
+
+# find best lambda
+(lambda = bcTransform$x[which(bcTransform$y == max(bcTransform$y))])
+
+# transform data
+bc_beer = (1/lambda)*(ts_beer^lambda-1)
+
+# calculate variance
+var(bc_beer)
+```
+
+## Square root transformation
+```{r}
+# apply square root transformation
+sq_beer = as.ts(beer$beer**(1/2))
+
+var(sq_beer)
+```
+
+## Comparision
+```{r}
+# plot boxcox time series
+plot(bc_beer, ylab = expression((1/lambda)~Y[t]^lambda-1), 
+     main = "Box Cox Transformed Data")
+
+# plot square root time series
+plot(sq_beer, ylab = expression(sqrt(Y[t])),
+     main = "Square Root Transformed Data")
+```
+
+Since both are very similar in transforming our data, we will continue with the square root transformation due to it being a simpler transformation.
+
+# Remove trend
+```{r}
+# difference at lag 1
+sqdif1 <- diff(sq_beer, differences = 1)
+
+# plot differenced data
+plot(sqdif1,
+     ylab = expression(nabla^{1}~sqrt(Y[t])),
+     main = "Detrended Data")
+abline(h = 0, lty = 2, col = 2)
+
+# plot acf and pacf of differenced time series
+acf(sqdif1, main="ACF of Detrended Data", lag.max = 50)
+pacf(sqdif1, main="PACF of Detrended Data", lag.max = 50)
+
+# calculate variance
+var(sqdif1)
+```
+
+# Remove seasonality
+```{r}
+# difference at lag 4
+sqdif1dif4 <- diff(sqdif1, lag = 4, differences = 1)
+
+# plot differenced data
+plot(sqdif1dif4,
+     ylab = expression(nabla^{4}~nabla^{1}~sqrt(Y[t])),
+     main = "Deseasonalized/Detrended Data")
+abline(h = 0, lty = 2, col = 2)
+
+# calculate variance
+var(sqdif1dif4)
+
+#see if further differencing needed
+var(diff(sqdif1dif4, 1)) < var(sqdif1dif4)
+```
+
+Since further differencing is not warranted, we assume our model is stationary but will verify using a Dicky Fuller test.
+
+```{r}
+# check data is stationary
+adf.test(sqdif1dif4) #yes
+```
+
+# Model Selection
+```{r}
+# plot acf and pacf of differenced time series
+acf(sqdif1dif4, main="ACF of Deseasonalized/Detrended Data", lag.max = 50)
+pacf(sqdif1dif4, main="PACF of Deseasonalized/Detrended Data", lag.max = 50)
+```
+
+For lags at multiples of our period (4), the PACF shows all are 0 and the ACF seems to tail / cut off after 1. Hence, P = 0 and Q = 1. We also know that d = 1 and D = 1 (lag = 4). Now we move to determine p and q. Looking at lag = 1, 2 or 3 we can see that both the PACF and ACF seem to tail off after lag = 2, so we will check models up to p = 2 and q = 2.
+
+```{r}
+# compare AIC
+for (i in 0:2)
+{
+  for (j in 0:2)
+  { 
+    cat(i,j, sep = " ")
+    print(AICc(arima(sq_beer, order = c(i,1,j), 
+                     seasonal = list(order = c(0,1,1), lag = 4), method = "ML")))
+  }
+}
+
+## first: 2 2 316.3044
+## second: 2 1 397.4942
+## third: 2 0 501.7827
+```
+
+```{r}
+(mod = arima(sq_beer, order = c(2,1,2), seasonal = list(order = c(0,1,1), period = 4), method = "ML"))
+AICc(mod)
+(auto_mod = auto.arima(sqdif1dif4, d=0))
+AICc(auto_mod)
+```
+
+The first model is $SARIMA(2,1,2) * (0,1,1)_{4}$.
+
+The second model is $SARIMA(3,1,4) * (0,1,0)_{4}$
+
+# Diagnostic checks
+## Plot Roots
+```{r}
+source("/Users/dailyuse/Desktop/plot.roots.R")
+
+# model 1
+plot.roots(NULL, c(1, -.1636, -.0701), main = "Roots of AR for Model 1")
+  # all roots inside circle, hence not invertible
+plot.roots(NULL, c(1, -1.1306, .5095), main = "Roots of MA for Model 1")
+  # only one root outside circle, hence not causal
+plot.roots(NULL, c(1, -.8404), main = "Roots of SMA for Model 1")
+  # all roots inside circle, hence not causal
+
+# model 2
+plot.roots(NULL, c(1, 1.0314, .6560, .2806), main = "Roots of AR for Model 2")
+  # all roots inside circle, hence not causal
+plot.roots(NULL, c(1, .0754, .0829, .0589, -.8155), main = "Roots of MA for Model 2")
+  # all roots inside circle, hence not invertible
+```
+
+## Normality
+```{r}
+r1 = residuals(mod)
+r2 = residuals(auto_mod)
+
+# histograms
+hist1 = hist(r1, main = "Histogram of Model 1 Residuals")
+hist(r2, main = "Histogram of Model 2 Residuals")
+
+# qq plot
+qqnorm(r1, main = "QQ Plot Model 1 Residuals")
+qqline(r1, lty = 2, col = 2)
+qqnorm(r2, main = "QQ Plot Model 2 Residuals")
+qqline(r2, lty = 2, col = 2)
+
+# shapiro-wilke
+shapiro.test(r1)
+shapiro.test(r2)
+
+## both normal
+```
+
+## Serial Correlation
+```{r}
+## ljung-box
+Box.test(r1, lag = sqrt(154), type= c("Ljung-Box"), fitdf = 4)
+#Box.test(r2, lag = 1, type= c("Ljung-Box"), fitdf = 0)
+Box.test(r2, lag = sqrt(154), type= c("Ljung-Box"), fitdf = 3)
+## box-pierce
+Box.test(r1, lag = sqrt(154), type= c("Box-Pierce"), fitdf = 4)
+#Box.test(r2, lag = 1, type= c("Box-Pierce"), fitdf = 0)
+Box.test(r2, lag = sqrt(154), type= c("Box-Pierce"), fitdf = 3)
+
+## both models pass
+```
+
+## ACF / PACF
+```{r}
+# model 1
+acf(r1**2)
+pacf(r1**2)
+title("ACF / PACF of Model 1 Residuals")
+# model 2
+acf(r2**2, "ACF of Model 2 Residuals")
+pacf(r2**2, "PACF of Model 2 Residuals")
+
+# both have majority of values lie within confidence intervals
+```
+
+Since both models seem to passour diagnostic checks, we will apply the principle of parsimony and choose the model with less parameters. 
+# Forecasting
+```{r}
+# set aside last 10 values for forecasting
+train_beer = ts(sq_beer[1:(length(sq_beer)-10)])
+# create training model
+(train_model = arima(train_beer, order=c(3,1,0)))
+```
+# Forecasting
+```{r}
+# set aside last 10 values for forecasting
+train_beer = ts(sq_beer[1:(length(sq_beer)-10)])
+# create training model
+(train_model1 = arima(train_beer, order = c(2,1,2), seasonal = list(order = c(0,1,1), period = 4), method = "ML"))
+```
+
+## Diagnostic Checks
+```{r}
+err1 = residuals(train_model1)
+hist(err1)
+qqnorm(err1, main = "QQ Plot of Training Data Residuals")
+qqline(err1, lty = 2, col = 2)
+shapiro.test(err1)
+Box.test(err1, lag = sqrt(length(sq_beer)), type= c("Ljung-Box"), fitdf = 4)
+Box.test(err1, lag = sqrt(length(sq_beer)), type= c("Box-Pierce"), fitdf = 4)
+acf(err1**2, main = "ACF of Training Residuals")
+pacf(err1**2, main = "PACF of Training Residuals")
+```
+
+## Predictions
+```{r}
+train_pred1 = predict(train_model1, n.ahead = 10)
+
+# create confidence interval
+up_CI1 = train_pred1$pred + 2*train_pred1$se
+low_CI1 = train_pred1$pred - 2*train_pred1$se
+```
+
+### Forecasted Data on Transformed Data
+```{r}
+ts.plot(train_beer, xlim = c(1, length(train_beer) + 10), 
+        main = "Forecasted Beer Data based on Transformed Beer Data",
+        ylab = expression(nabla^{4}~nabla^{1}~sqrt(Y[t])))
+## confidence interval lines
+lines(up_CI1, col = "blue", lty = "dotted")
+lines(low_CI1, col = "blue", lty = "dotted")
+## predicted values
+points((length(train_beer)+1):(length(train_beer)+10), train_pred1$pred, col = "red")
+```
+
+### Forecasted Data on Transformed Data (Zoomed In)
+```{r}
+ts.plot(train_beer, xlim = c(length(train_beer)-10, length(train_beer)+10), 
+        main = "Forecasted Beer Data based on Transformed Beer Data",
+        ylab = expression(nabla^{4}~nabla^{1}~sqrt(Y[t])))
+## confidence interval lines
+lines(up_CI1, col = "blue", lty = "dotted")
+lines(low_CI1, col = "blue", lty = "dotted")
+## predicted values
+points((length(train_beer)+1):(length(train_beer)+10), train_pred1$pred, col = "red")
+lines((length(train_beer)+1):(length(train_beer)+10), train_pred1$pred, lty = 1, col = "red")
+## forecasted section
+abline(v = 145, lty = 3)
+abline(v = 154, lty = 3)
+```
+
+
+### Forecasted Data on Original Data
+```{r}
+# get CI for original data
+pred_orig1 = train_pred1$pred^(1/.5)
+up_orig1 = up_CI1^(1/.5)
+low_orig1 = low_CI1^(1/.5)
+orig_beer = ts(beer[,2])
+
+ts.plot(orig_beer, xlim = c(1, length(orig_beer)), 
+        main = "Forecasted Beer Data from Original Beer Data",
+        ylab = "Beer Production (mega-liters)")
+## confidence interval lines
+lines(up_orig1, col = "blue", lty = "dotted")
+lines(low_orig1, col = "blue", lty = "dotted")
+## predicted values
+points((length(train_beer)+1):(length(train_beer)+10), pred_orig1, col = "red")
+```
+
+### Forecasted Data on Original Data (Zoomed In)
+```{r}
+ts.plot(orig_beer, xlim = c(length(orig_beer)-20, length(orig_beer)), 
+        main = "Observed vs. Forecasted Values",
+        ylab = "Beer Production (mega-liters)")
+## confidence interval lines
+lines((length(train_beer)+1):(length(train_beer)+10), up_orig1, lty = 2, col = "blue")
+lines((length(train_beer)+1):(length(train_beer)+10), low_orig1, lty = 2, col = "blue")
+## prediction line / point
+lines((length(train_beer)+1):(length(train_beer)+10), pred_orig1, lty = 1, col = "red")
+points((length(train_beer)+1):(length(train_beer)+10), pred_orig1, col = "red")
+## actual values
+points((length(train_beer)+1):(length(train_beer)+10), orig_beer[145:154], col = "orange")
+## forecasted section
+abline(v = 145, lty = 3)
+abline(v = 154, lty = 3)
+```
+
+
